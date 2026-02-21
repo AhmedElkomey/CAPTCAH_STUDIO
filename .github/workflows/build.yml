@@ -1,55 +1,123 @@
-name: Build Windows Executable
+name: "🚀 CAPTCHA Studio — Build & Release"
 
 on:
   push:
-    branches:
-      - main
-      - master
-    tags:
-      - 'v*'
+    branches: [main, master]
+    tags: ["v*"]
   pull_request:
-    branches:
-      - main
-      - master
+    branches: [main, master]
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  # ─────────────────────────────────────────────────────────────────────────────
+  # JOB 1: Build the Windows Executable
+  # ─────────────────────────────────────────────────────────────────────────────
   build:
+    name: "Build (Windows)"
     runs-on: windows-latest
-    
+    outputs:
+      artifact-name: ${{ steps.meta.outputs.artifact_name }}
+
     steps:
-    - name: Checkout Repository
-      uses: actions/checkout@v4
+      - name: "📥 Checkout source"
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0    # needed for tag-based release notes
 
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.11'
-        cache: 'pip'
+      - name: "🐍 Set up Python 3.11"
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
 
-    - name: Install Dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt
-        
-    - name: Build Executable via Pyinstaller
-      run: |
-        python -m PyInstaller --noconfirm --onedir --windowed --noconsole --name "CAPTCHA_STUDIO" --hidden-import "PIL" --hidden-import "cv2" --hidden-import "numpy" --add-data "ui;ui" app.py
-        
-    - name: Archive Released Build
-      uses: actions/upload-artifact@v4
-      with:
-        name: CAPTCHA_STUDIO-Windows-Portable
-        path: dist/CAPTCHA_STUDIO/
+      - name: "📦 Install dependencies"
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
-    - name: Compress Directory for Release
-      if: startsWith(github.ref, 'refs/tags/')
-      run: Compress-Archive -Path dist/CAPTCHA_STUDIO -DestinationPath dist/CAPTCHA_STUDIO-Windows-Portable.zip
+      - name: "🔨 Build with PyInstaller"
+        run: >
+          python -m PyInstaller
+          --noconfirm
+          --onedir
+          --windowed
+          --noconsole
+          --name "CAPTCHA_Studio"
+          --hidden-import PIL
+          --hidden-import cv2
+          --hidden-import numpy
+          --add-data "ui;ui"
+          app.py
 
-    - name: Publish GitHub Release
-      if: startsWith(github.ref, 'refs/tags/')
-      uses: softprops/action-gh-release@v2
-      with:
-        files: dist/CAPTCHA_STUDIO-Windows-Portable.zip
-        prerelease: true
-        generate_release_notes: true
+      - name: "📐 Compute artifact name"
+        id: meta
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}" -replace "^v", ""
+          $name = "CAPTCHA_Studio-Windows-$version"
+          echo "artifact_name=$name" >> $env:GITHUB_OUTPUT
+
+      - name: "🗜 Compress build"
+        shell: pwsh
+        run: |
+          Compress-Archive `
+            -Path dist/CAPTCHA_Studio `
+            -DestinationPath "dist/${{ steps.meta.outputs.artifact_name }}.zip" `
+            -Force
+
+      - name: "💾 Upload build artifact"
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.artifact_name }}
+          path: "dist/${{ steps.meta.outputs.artifact_name }}.zip"
+          retention-days: 7
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # JOB 2: Publish GitHub Release (runs only on version tags)
+  # ─────────────────────────────────────────────────────────────────────────────
+  release:
+    name: "Publish Release"
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+
+    steps:
+      - name: "📥 Checkout source"
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: "⬇️ Download build artifact"
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.artifact-name }}
+          path: release-assets
+
+      - name: "🚀 Create GitHub Release"
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "CAPTCHA Studio ${{ github.ref_name }}"
+          tag_name: ${{ github.ref_name }}
+          prerelease: ${{ contains(github.ref_name, 'beta') || contains(github.ref_name, 'alpha') || contains(github.ref_name, 'rc') }}
+          generate_release_notes: true
+          body: |
+            ## 📦 Download
+
+            | Asset | Platform | Notes |
+            |-------|----------|-------|
+            | `CAPTCHA_Studio-Windows-*.zip` | Windows 10/11 x64 | No Python required — extract & run |
+
+            ## 🚀 Quick Start
+            1. Download and extract the zip file.
+            2. Run `CAPTCHA_Studio.exe` inside the extracted folder.
+            3. Use the **Annotator** tab to label images and the **Generator** tab to synthesise new CAPTCHAs.
+
+            ## 📋 What's Changed
+            <!-- GitHub automatically appends the auto-generated changelog below -->
+          files: release-assets/*.zip
