@@ -5,6 +5,8 @@ on:
     branches:
       - main
       - master
+    tags:
+      - 'v*'
   pull_request:
     branches:
       - main
@@ -39,3 +41,15 @@ jobs:
       with:
         name: CAPTCHA_STUDIO-Windows-Portable
         path: dist/CAPTCHA_STUDIO/
+
+    - name: Compress Directory for Release
+      if: startsWith(github.ref, 'refs/tags/')
+      run: Compress-Archive -Path dist/CAPTCHA_STUDIO -DestinationPath dist/CAPTCHA_STUDIO-Windows-Portable.zip
+
+    - name: Publish GitHub Release
+      if: startsWith(github.ref, 'refs/tags/')
+      uses: softprops/action-gh-release@v2
+      with:
+        files: dist/CAPTCHA_STUDIO-Windows-Portable.zip
+        prerelease: true
+        generate_release_notes: true
