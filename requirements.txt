@@ -1,4 +1,5 @@
-fastapi
-uvicorn
-jinja2
-python-multipart
+PySide6>=6.6.0
+numpy>=1.24.0
+pillow>=10.0.0
+opencv-python>=4.8.0
+pyinstaller>=6.3.0
