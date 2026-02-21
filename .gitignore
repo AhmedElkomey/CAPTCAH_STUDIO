@@ -1,0 +1,19 @@
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+env/
+.venv/
+.env/
+
+# IDEs
+.vscode/
+.idea/
+
+# Application Specific
+generated_captchas/
+data/
+test/
+annotations.json
+labels.txt
+*.csv
