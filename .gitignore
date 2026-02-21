@@ -17,3 +17,8 @@ test/
 annotations.json
 labels.txt
 *.csv
+
+# Pyinstaller specific
+build/
+dist/
+*.spec
