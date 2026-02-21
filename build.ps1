@@ -17,7 +17,7 @@ if (Test-Path "build") {
 # --noconsole: hides the terminal window
 # --name: the output generic name
 # --hidden-import: ensures dynamic imports from PIL and cv2 don't crash the executable
-pyinstaller --noconfirm `
+python -m PyInstaller --noconfirm `
     --onedir `
     --windowed `
     --noconsole `
