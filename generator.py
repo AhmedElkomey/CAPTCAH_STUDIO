@@ -24,6 +24,9 @@ TRANSPARENT_DISTRACTOR = False
 # If 0, uses the standard solid color with basic noise shapes
 RICH_BACKGROUND_PROBABILITY = 1.0
 
+# If > 0, specifies probability of a completely blank solid color background (no noise)
+SOLID_BACKGROUND_PROBABILITY = 0.0
+
 # Rich background tuning
 BG_DISTORTION = True
 BG_DISTORTION_MIN = 0.8
@@ -218,7 +221,8 @@ def create_captcha(scatter_factor=0.6, jitter_factor=0.5):
     """
     Creates a captcha with configurable destruction levels.
     """
-    if random.random() < RICH_BACKGROUND_PROBABILITY:
+    rand_val = random.random()
+    if rand_val < RICH_BACKGROUND_PROBABILITY:
         # Ask bg_gen.py for a beautiful layered texture
         img, _, _ = generate_texture_image(
             IMG_WIDTH, 
@@ -232,6 +236,11 @@ def create_captcha(scatter_factor=0.6, jitter_factor=0.5):
         )
         base_color = None
         noise_layer = generate_noise_layer(IMG_WIDTH, IMG_HEIGHT)
+    elif rand_val < RICH_BACKGROUND_PROBABILITY + SOLID_BACKGROUND_PROBABILITY:
+        # Completely solid color background (no noise shapes)
+        base_color = (random.randint(150, 250), random.randint(150, 250), random.randint(150, 250))
+        img = Image.new('RGBA', (IMG_WIDTH, IMG_HEIGHT), base_color)
+        noise_layer = Image.new('RGBA', (IMG_WIDTH, IMG_HEIGHT), (0, 0, 0, 0))
     else:
         # 1. Base Image (Solid color)
         base_color = (random.randint(150, 250), random.randint(150, 250), random.randint(150, 250))

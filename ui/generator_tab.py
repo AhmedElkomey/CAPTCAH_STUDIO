@@ -83,6 +83,12 @@ class GeneratorTab(QWidget):
         self.spin_rich_bg_prob.valueChanged.connect(self.trigger_preview_update)
         bg_layout.addRow("Rich Background %:", self.spin_rich_bg_prob)
         
+        self.spin_solid_bg_prob = QSpinBox()
+        self.spin_solid_bg_prob.setRange(0, 100)
+        self.spin_solid_bg_prob.setValue(int(generator.SOLID_BACKGROUND_PROBABILITY * 100))
+        self.spin_solid_bg_prob.valueChanged.connect(self.trigger_preview_update)
+        bg_layout.addRow("Solid Color % (No Noise):", self.spin_solid_bg_prob)
+        
         self.combo_bg_style = QComboBox()
         self.combo_bg_style.addItem("random")
         self.combo_bg_style.addItems(sorted(TEXTURE_STYLES.keys()))
@@ -262,6 +268,7 @@ class GeneratorTab(QWidget):
         help_text = (
             "<h3>Generator Controls</h3>"
             "<b>Rich Background %:</b> Probability (0-100) of using realistic textures (wood, marble, canvas) instead of a solid color.<br>"
+            "<b>Solid Color % (No Noise):</b> Probability (0-100) of skipping textures AND noise and using a 100% plain color background.<br>"
             "<b>Texture Style:</b> Force a specific texture type, or leave as 'random'.<br>"
             "<b>Mesh Warp:</b> Distorts the background realistically.<br>"
             "<b>Synthetic Scribbles & Vignette:</b> Adds light pen strokes and darkens edges.<br>"
@@ -285,6 +292,7 @@ class GeneratorTab(QWidget):
     def sync_globals(self):
         """Pushes UI settings into generator module globals where needed"""
         generator.RICH_BACKGROUND_PROBABILITY = self.spin_rich_bg_prob.value() / 100.0
+        generator.SOLID_BACKGROUND_PROBABILITY = self.spin_solid_bg_prob.value() / 100.0
         generator.BG_DISTORTION = self.chk_bg_dist.isChecked()
         generator.BG_SCRIBBLES = self.chk_bg_scribbles.isChecked()
         generator.BG_VIGNETTE = self.chk_bg_vignette.isChecked()
