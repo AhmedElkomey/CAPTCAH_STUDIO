@@ -77,11 +77,74 @@ jobs:
           retention-days: 7
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # JOB 2: Publish GitHub Release (runs only on version tags)
+  # JOB 2: Build the Linux Executable
+  # ─────────────────────────────────────────────────────────────────────────────
+  build-linux:
+    name: "Build (Linux)"
+    runs-on: ubuntu-latest
+    outputs:
+      artifact-name: ${{ steps.meta.outputs.artifact_name }}
+
+    steps:
+      - name: "📥 Checkout source"
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: "🐧 Install system dependencies"
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libglib2.0-0 libsm6 libxext6 libxrender-dev libgl1-mesa-glx python3-opencv
+
+      - name: "🐍 Set up Python 3.11"
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: "📦 Install dependencies"
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: "🔨 Build with PyInstaller"
+        run: >
+          python -m PyInstaller
+          --noconfirm
+          --onedir
+          --windowed
+          --name "CAPTCHA_Studio"
+          --hidden-import PIL
+          --hidden-import cv2
+          --hidden-import numpy
+          --add-data "ui:ui"
+          app.py
+
+      - name: "📐 Compute artifact name"
+        id: meta
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          name="CAPTCHA_Studio-Linux-$version"
+          echo "artifact_name=$name" >> $GITHUB_OUTPUT
+
+      - name: "🗜 Compress build"
+        run: |
+          cd dist
+          tar -czvf "${{ steps.meta.outputs.artifact_name }}.tar.gz" CAPTCHA_Studio
+
+      - name: "💾 Upload build artifact"
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.artifact_name }}
+          path: "dist/${{ steps.meta.outputs.artifact_name }}.tar.gz"
+          retention-days: 7
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # JOB 3: Publish GitHub Release (runs only on version tags)
   # ─────────────────────────────────────────────────────────────────────────────
   release:
     name: "Publish Release"
-    needs: build
+    needs: [build, build-linux]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
@@ -93,10 +156,16 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: "⬇️ Download build artifact"
+      - name: "⬇️ Download Windows build artifact"
         uses: actions/download-artifact@v4
         with:
           name: ${{ needs.build.outputs.artifact-name }}
+          path: release-assets
+
+      - name: "⬇️ Download Linux build artifact"
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build-linux.outputs.artifact-name }}
           path: release-assets
 
       - name: "🚀 Create GitHub Release"
@@ -112,12 +181,13 @@ jobs:
             | Asset | Platform | Notes |
             |-------|----------|-------|
             | `CAPTCHA_Studio-Windows-*.zip` | Windows 10/11 x64 | No Python required — extract & run |
+            | `CAPTCHA_Studio-Linux-*.tar.gz` | Linux x64 | No Python required — extract & run |
 
             ## 🚀 Quick Start
-            1. Download and extract the zip file.
-            2. Run `CAPTCHA_Studio.exe` inside the extracted folder.
+            1. Download and extract the archive for your OS.
+            2. Run `CAPTCHA_Studio.exe` (Windows) or `./CAPTCHA_Studio` (Linux) inside the extracted folder.
             3. Use the **Annotator** tab to label images and the **Generator** tab to synthesise new CAPTCHAs.
 
             ## 📋 What's Changed
             <!-- GitHub automatically appends the auto-generated changelog below -->
-          files: release-assets/*.zip
+          files: release-assets/*
