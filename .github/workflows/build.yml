@@ -19,6 +19,7 @@ jobs:
   build:
     name: "Build (Windows)"
     runs-on: windows-latest
+    timeout-minutes: 30
     outputs:
       artifact-name: ${{ steps.meta.outputs.artifact_name }}
 
@@ -26,7 +27,7 @@ jobs:
       - name: "📥 Checkout source"
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0    # needed for tag-based release notes
+          fetch-depth: 1
 
       - name: "🐍 Set up Python 3.11"
         uses: actions/setup-python@v5
@@ -38,6 +39,10 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+
+      - name: "✅ Syntax check"
+        run: |
+          python -m compileall -q app.py main.py generator.py bg_gen.py ui
 
       - name: "🔨 Build with PyInstaller"
         run: >
@@ -57,8 +62,19 @@ jobs:
         id: meta
         shell: pwsh
         run: |
-          $version = "${{ github.ref_name }}" -replace "^v", ""
-          $name = "CAPTCHA_Studio-Windows-$version"
+          if ($env:GITHUB_REF_TYPE -eq "tag") {
+            $raw = $env:GITHUB_REF_NAME -replace "^v", ""
+          } elseif ($env:GITHUB_EVENT_NAME -eq "pull_request" -and $env:GITHUB_REF -match "^refs/pull/(\d+)/") {
+            $raw = "pr-$($Matches[1])"
+          } else {
+            $shortSha = if ($env:GITHUB_SHA.Length -ge 7) { $env:GITHUB_SHA.Substring(0, 7) } else { $env:GITHUB_SHA }
+            $raw = "sha-$shortSha"
+          }
+          $safe = ($raw -replace "[^0-9A-Za-z._-]", "-").Trim("-")
+          if ([string]::IsNullOrWhiteSpace($safe)) {
+            $safe = "dev"
+          }
+          $name = "CAPTCHA_Studio-Windows-$safe"
           echo "artifact_name=$name" >> $env:GITHUB_OUTPUT
 
       - name: "🗜 Compress build"
@@ -82,6 +98,7 @@ jobs:
   build-linux:
     name: "Build (Linux)"
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     outputs:
       artifact-name: ${{ steps.meta.outputs.artifact_name }}
 
@@ -89,12 +106,12 @@ jobs:
       - name: "📥 Checkout source"
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 1
 
       - name: "🐧 Install system dependencies"
         run: |
           sudo apt-get update
-          sudo apt-get install -y libglib2.0-0 libsm6 libxext6 libxrender-dev libgl1 python3-opencv
+          sudo apt-get install -y --no-install-recommends libglib2.0-0 libsm6 libxext6 libxrender1 libgl1
 
       - name: "🐍 Set up Python 3.11"
         uses: actions/setup-python@v5
@@ -106,6 +123,10 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+
+      - name: "✅ Syntax check"
+        run: |
+          python -m compileall -q app.py main.py generator.py bg_gen.py ui
 
       - name: "🔨 Build with PyInstaller"
         run: >
@@ -123,8 +144,18 @@ jobs:
       - name: "📐 Compute artifact name"
         id: meta
         run: |
-          version="${GITHUB_REF_NAME#v}"
-          name="CAPTCHA_Studio-Linux-$version"
+          if [[ "${GITHUB_REF_TYPE:-}" == "tag" ]]; then
+            raw="${GITHUB_REF_NAME#v}"
+          elif [[ "${GITHUB_EVENT_NAME}" == "pull_request" && "${GITHUB_REF}" =~ ^refs/pull/([0-9]+)/ ]]; then
+            raw="pr-${BASH_REMATCH[1]}"
+          else
+            raw="sha-${GITHUB_SHA::7}"
+          fi
+          safe="$(echo "$raw" | sed -E 's/[^0-9A-Za-z._-]+/-/g; s/^-+//; s/-+$//')"
+          if [[ -z "$safe" ]]; then
+            safe="dev"
+          fi
+          name="CAPTCHA_Studio-Linux-$safe"
           echo "artifact_name=$name" >> $GITHUB_OUTPUT
 
       - name: "🗜 Compress build"
@@ -146,34 +177,59 @@ jobs:
     name: "Publish Release"
     needs: [build, build-linux]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: always()
+    timeout-minutes: 15
     permissions:
       contents: write
 
     steps:
-      - name: "📥 Checkout source"
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+      - name: "🔎 Evaluate release conditions"
+        id: gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_EVENT_NAME}" == "push" && "${GITHUB_REF}" == refs/tags/v* ]]; then
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+            echo "tag_name=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+            echo "Version tag detected: ${GITHUB_REF_NAME}"
+          else
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            echo "This run is not a version-tag push. Release publishing is skipped by design."
+          fi
+
+      - name: "🧪 Validate build prerequisites"
+        if: steps.gate.outputs.should_release == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ needs.build.result }}" != "success" || "${{ needs.build-linux.result }}" != "success" ]]; then
+            echo "Windows build result: ${{ needs.build.result }}"
+            echo "Linux build result: ${{ needs.build-linux.result }}"
+            echo "Cannot publish release because one or more prerequisite builds failed."
+            exit 1
+          fi
 
       - name: "⬇️ Download Windows build artifact"
+        if: steps.gate.outputs.should_release == 'true'
         uses: actions/download-artifact@v4
         with:
           name: ${{ needs.build.outputs.artifact-name }}
           path: release-assets
 
       - name: "⬇️ Download Linux build artifact"
+        if: steps.gate.outputs.should_release == 'true'
         uses: actions/download-artifact@v4
         with:
           name: ${{ needs.build-linux.outputs.artifact-name }}
           path: release-assets
 
       - name: "🚀 Create GitHub Release"
+        if: steps.gate.outputs.should_release == 'true'
         uses: softprops/action-gh-release@v2
         with:
-          name: "CAPTCHA Studio ${{ github.ref_name }}"
-          tag_name: ${{ github.ref_name }}
-          prerelease: ${{ contains(github.ref_name, 'beta') || contains(github.ref_name, 'alpha') || contains(github.ref_name, 'rc') }}
+          name: "CAPTCHA Studio ${{ steps.gate.outputs.tag_name }}"
+          tag_name: ${{ steps.gate.outputs.tag_name }}
+          prerelease: ${{ contains(steps.gate.outputs.tag_name, 'beta') || contains(steps.gate.outputs.tag_name, 'alpha') || contains(steps.gate.outputs.tag_name, 'rc') }}
           generate_release_notes: true
           body: |
             ## 📦 Download
@@ -190,4 +246,6 @@ jobs:
 
             ## 📋 What's Changed
             <!-- GitHub automatically appends the auto-generated changelog below -->
-          files: release-assets/*
+          files: |
+            release-assets/*.zip
+            release-assets/*.tar.gz

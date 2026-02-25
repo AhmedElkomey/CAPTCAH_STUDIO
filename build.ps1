@@ -1,37 +1,55 @@
-# Build Script for CAPTCHA Desktop App
-# Requires PyInstaller to be installed (`pip install pyinstaller`)
+# Build script for CAPTCHA Desktop App (Windows).
+# Requires PyInstaller to be installed: python -m pip install pyinstaller
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
+if ($PSVersionTable.PSVersion.Major -ge 7) {
+    $PSNativeCommandUseErrorActionPreference = $true
+}
+
+$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+Set-Location $scriptDir
 
 Write-Host "Building CAPTCHA Desktop App with PyInstaller..." -ForegroundColor Cyan
 
-# Ensure output gets cleanly rebuilt
-if (Test-Path "dist\CAPTCHA_STUDIO") {
-    Remove-Item -Recurse -Force "dist\CAPTCHA_STUDIO"
+if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
+    Write-Host "Python is not available on PATH." -ForegroundColor Red
+    exit 1
 }
-if (Test-Path "build") {
-    Remove-Item -Recurse -Force "build"
+if (-not (Test-Path ".\app.py")) {
+    Write-Host "app.py was not found. Run this script from the repository root." -ForegroundColor Red
+    exit 1
+}
+if (-not (Test-Path ".\ui")) {
+    Write-Host "ui folder was not found. Packaging cannot continue." -ForegroundColor Red
+    exit 1
 }
 
-# Run PyInstaller
-# --noconfirm: overwrite existing
-# --onedir: creates a folder with the exe and dependencies (much faster startup than --onefile)
-# --noconsole: hides the terminal window
-# --name: the output generic name
-# --hidden-import: ensures dynamic imports from PIL and cv2 don't crash the executable
-python -m PyInstaller --noconfirm `
+# Ensure output gets cleanly rebuilt.
+foreach ($path in @(".\dist\CAPTCHA_Studio", ".\build")) {
+    if (Test-Path $path) {
+        Remove-Item -Recurse -Force $path
+    }
+}
+
+# Run PyInstaller.
+& python -m PyInstaller --noconfirm `
+    --clean `
     --onedir `
     --windowed `
-    --noconsole `
-    --name "CAPTCHA_STUDIO" `
+    --name "CAPTCHA_Studio" `
     --hidden-import "PIL" `
     --hidden-import "cv2" `
     --hidden-import "numpy" `
     --add-data "ui;ui" `
     app.py
 
-if ($LASTEXITCODE -eq 0) {
+$exePath = ".\dist\CAPTCHA_Studio\CAPTCHA_Studio.exe"
+if (Test-Path $exePath) {
     Write-Host "`nBuild Successful!" -ForegroundColor Green
-    Write-Host "Executable is located at: dist\CAPTCHA_STUDIO\CAPTCHA_STUDIO.exe" -ForegroundColor Yellow
+    Write-Host "Executable is located at: $exePath" -ForegroundColor Yellow
+    exit 0
 }
-else {
-    Write-Host "`nBuild Failed." -ForegroundColor Red
-}
+
+Write-Host "`nBuild failed: expected output not found at $exePath" -ForegroundColor Red
+exit 1
