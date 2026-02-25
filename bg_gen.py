@@ -1,3 +1,4 @@
+import os
 import math
 import secrets
 import random
@@ -5,11 +6,49 @@ from typing import Optional, Tuple, List, Dict, Callable
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFilter, ImageChops
+try:
+    import cv2
+except ImportError:
+    cv2 = None
 
 
 # ============================================================
 # Core helpers
 # ============================================================
+
+CUSTOM_PHOTO_DIR = None
+PHOTO_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
+_CUSTOM_PHOTO_CACHE = {"dir": None, "stamp": None, "files": []}
+
+
+def _custom_photo_files() -> List[str]:
+    if not CUSTOM_PHOTO_DIR or not os.path.isdir(CUSTOM_PHOTO_DIR):
+        return []
+    try:
+        stamp = os.path.getmtime(CUSTOM_PHOTO_DIR)
+    except OSError:
+        return []
+    if (
+        _CUSTOM_PHOTO_CACHE["dir"] == CUSTOM_PHOTO_DIR
+        and _CUSTOM_PHOTO_CACHE["stamp"] == stamp
+    ):
+        return list(_CUSTOM_PHOTO_CACHE["files"])
+    try:
+        files = [
+            name
+            for name in os.listdir(CUSTOM_PHOTO_DIR)
+            if os.path.splitext(name.lower())[1] in PHOTO_EXTENSIONS
+        ]
+    except OSError:
+        return []
+    _CUSTOM_PHOTO_CACHE["dir"] = CUSTOM_PHOTO_DIR
+    _CUSTOM_PHOTO_CACHE["stamp"] = stamp
+    _CUSTOM_PHOTO_CACHE["files"] = list(files)
+    return files
+
+
+def _has_custom_photo_dir() -> bool:
+    return len(_custom_photo_files()) > 0
 
 def _to_float01(img_rgb: Image.Image) -> np.ndarray:
     return np.asarray(img_rgb, dtype=np.float32) / 255.0
@@ -154,10 +193,8 @@ def add_speckles(width: int, height: int, rng: np.random.Generator, amount: floa
 # ============================================================
 
 def mesh_warp(img: Image.Image, rng: np.random.Generator, grid_size: int = 6, magnitude: float = 6.0) -> Image.Image:
-    try:
-        import cv2
-    except ImportError:
-        # Fallback if cv2 is unexpectedly not available
+    if cv2 is None:
+        # Fallback if OpenCV is not available.
         return _mesh_warp_pil(img, rng, grid_size, magnitude)
 
     w, h = img.size
@@ -743,6 +780,38 @@ def tex_moss(width: int, height: int, rng: np.random.Generator) -> Image.Image:
     return out.convert("RGBA")
 
 
+def tex_custom_photo(width: int, height: int, rng: np.random.Generator) -> Image.Image:
+    """Loads a random image from CUSTOM_PHOTO_DIR and crops a width x height section from it."""
+    if not CUSTOM_PHOTO_DIR or not os.path.isdir(CUSTOM_PHOTO_DIR):
+        return tex_paper(width, height, rng)
+        
+    files = _custom_photo_files()
+    
+    if not files:
+        return tex_paper(width, height, rng)
+        
+    chosen_file = rng.choice(files)
+    file_path = os.path.join(CUSTOM_PHOTO_DIR, chosen_file)
+    
+    try:
+        with Image.open(file_path) as img:
+            img = img.convert("RGBA")
+            img_w, img_h = img.size
+            if img_w < width or img_h < height:
+                # Resize image proportionally to cover the required region
+                ratio = max(width / img_w, height / img_h)
+                new_w = max(width, int(img_w * ratio))
+                new_h = max(height, int(img_h * ratio))
+                img = img.resize((new_w, new_h), Image.LANCZOS)
+                img_w, img_h = img.size
+                
+            left = int(rng.integers(0, img_w - width + 1))
+            top = int(rng.integers(0, img_h - height + 1))
+            return img.crop((left, top, left + width, top + height))
+    except Exception:
+        return tex_paper(width, height, rng)
+
+
 # Registry of styles
 TEXTURE_STYLES: Dict[str, Callable[[int, int, np.random.Generator], Image.Image]] = {
     "paper": tex_paper,
@@ -764,6 +833,7 @@ TEXTURE_STYLES: Dict[str, Callable[[int, int, np.random.Generator], Image.Image]
     "rust": tex_rust,
     "ice": tex_ice,
     "moss": tex_moss,
+    "custom_photo": tex_custom_photo,
 }
 
 
@@ -796,7 +866,10 @@ def generate_texture_image(
     rnd = random.Random(seed)
 
     if style == "random":
-        style_used = rnd.choice(list(TEXTURE_STYLES.keys()))
+        random_styles = list(TEXTURE_STYLES.keys())
+        if not _has_custom_photo_dir() and "custom_photo" in random_styles:
+            random_styles.remove("custom_photo")
+        style_used = rnd.choice(random_styles)
     else:
         if style not in TEXTURE_STYLES:
             raise ValueError(f"Unknown style '{style}'. Valid: {sorted(TEXTURE_STYLES.keys())} or 'random'")

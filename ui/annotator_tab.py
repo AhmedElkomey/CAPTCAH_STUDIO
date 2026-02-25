@@ -1,15 +1,14 @@
 import os
-import json
-import csv
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, 
     QProgressBar, QListWidget, QFileDialog, QGraphicsView, QGraphicsScene, 
-    QMessageBox, QSplitter, QListWidgetItem, QFrame
+    QMessageBox, QSplitter, QListWidgetItem
 )
-from PySide6.QtGui import QPixmap, QImage, QKeySequence, QShortcut, QPainter
-from PySide6.QtCore import Qt, QSize
+from PySide6.QtGui import QPixmap, QKeySequence, QShortcut, QPainter
+from PySide6.QtCore import Qt
 
 # No fixed ANNOTATIONS_FILE since it depends on the loaded directory
+FLAGGED_LABEL = "[FLAGGED]"
 
 class AnnotatorTab(QWidget):
     def __init__(self):
@@ -21,6 +20,7 @@ class AnnotatorTab(QWidget):
         self.history = [] # list of (filename, previous_label) for undo
         
         self.labels_file = None
+        self.flags_file = None
         
         self.init_ui()
         
@@ -39,15 +39,31 @@ class AnnotatorTab(QWidget):
                             self.annotations[parts[0]] = parts[1]
             except Exception:
                 pass
+        if self.flags_file and os.path.exists(self.flags_file):
+            try:
+                with open(self.flags_file, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        fname = line.strip()
+                        if fname:
+                            self.annotations[fname] = FLAGGED_LABEL
+            except Exception:
+                pass
 
     def save_annotations(self):
         if not self.labels_file:
             return
-            
+
+        flagged = []
         with open(self.labels_file, 'w', encoding='utf-8', newline='') as f:
             for fname, label in self.annotations.items():
-                if label != "[FLAGGED]":
-                    f.write(f"{fname}\t{label}\n")
+                if label == FLAGGED_LABEL:
+                    flagged.append(fname)
+                    continue
+                f.write(f"{fname}\t{label}\n")
+        if self.flags_file:
+            with open(self.flags_file, 'w', encoding='utf-8', newline='') as f:
+                for fname in sorted(flagged):
+                    f.write(f"{fname}\n")
 
     def init_ui(self):
         main_layout = QHBoxLayout(self)
@@ -112,8 +128,33 @@ class AnnotatorTab(QWidget):
         right_layout.addLayout(nav_layout)
 
         # Progress
+        self.lbl_progress_summary = QLabel("Labeled 0/0 • Flagged 0 • Reviewed 0")
+        self.lbl_progress_summary.setAlignment(Qt.AlignCenter)
+        self.lbl_progress_summary.setStyleSheet(
+            "padding: 6px; color: #d4d4d4; font-size: 12px; font-weight: 600;"
+        )
+        right_layout.addWidget(self.lbl_progress_summary)
+
         self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setFormat("0% Labeled")
         self.progress_bar.setTextVisible(True)
+        self.progress_bar.setFixedHeight(24)
+        self.progress_bar.setStyleSheet(
+            "QProgressBar {"
+            " border: 1px solid #3a3a3a;"
+            " border-radius: 12px;"
+            " background: #1f1f1f;"
+            " color: #f3f3f3;"
+            " text-align: center;"
+            " font-weight: 700;"
+            "}"
+            "QProgressBar::chunk {"
+            " border-radius: 12px;"
+            " background-color: #0e639c;"
+            "}"
+        )
         right_layout.addWidget(self.progress_bar)
 
         # Splitter to hold both panels
@@ -139,9 +180,11 @@ class AnnotatorTab(QWidget):
         if os.path.exists(images_sub) and os.path.isdir(images_sub):
             self.image_dir = images_sub
             self.labels_file = os.path.join(folder, "labels.txt")
+            self.flags_file = os.path.join(folder, "flags.txt")
         else:
             self.image_dir = folder
             self.labels_file = os.path.join(folder, "labels.txt")
+            self.flags_file = os.path.join(folder, "flags.txt")
             
         self.load_annotations()
         
@@ -156,7 +199,10 @@ class AnnotatorTab(QWidget):
         
         for img in self.images:
             item = QListWidgetItem(img)
-            if img in self.annotations:
+            label = self.annotations.get(img)
+            if label == FLAGGED_LABEL:
+                item.setForeground(Qt.yellow)
+            elif label is not None:
                 item.setForeground(Qt.green)
             self.list_widget.addItem(item)
             
@@ -201,7 +247,7 @@ class AnnotatorTab(QWidget):
         
         # Setup text field
         existing_label = self.annotations.get(filename, "")
-        self.input_field.setText(existing_label)
+        self.input_field.setText("" if existing_label == FLAGGED_LABEL else existing_label)
         self.input_field.setFocus()
         self.input_field.selectAll()
         
@@ -239,7 +285,7 @@ class AnnotatorTab(QWidget):
         old_val = self.annotations.get(filename)
         self.history.append((filename, old_val))
         
-        self.annotations[filename] = "[FLAGGED]"
+        self.annotations[filename] = FLAGGED_LABEL
         self.save_annotations()
         
         item = self.list_widget.item(self.current_index)
@@ -271,7 +317,7 @@ class AnnotatorTab(QWidget):
                 if old_val is None:
                     # Remove color if un-annotated
                     item.setData(Qt.ForegroundRole, None)
-                elif old_val == "[FLAGGED]":
+                elif old_val == FLAGGED_LABEL:
                     item.setForeground(Qt.yellow)
                 else:
                     item.setForeground(Qt.green)
@@ -290,18 +336,35 @@ class AnnotatorTab(QWidget):
     def update_progress(self):
         total = len(self.images)
         if total == 0:
-            self.progress_bar.setFormat("0 / 0 annotated")
+            self.lbl_progress_summary.setText("Labeled 0/0 • Flagged 0 • Reviewed 0")
+            self.progress_bar.setFormat("0% Labeled")
             self.progress_bar.setValue(0)
             return
             
-        # Count annotations that exist for files in the CURRENT directory
-        done = sum(1 for img in self.images if img in self.annotations)
-        self.progress_bar.setMaximum(total)
-        self.progress_bar.setValue(done)
-        self.progress_bar.setFormat(f"{done} / {total} annotated")
+        labeled = sum(
+            1 for img in self.images
+            if img in self.annotations and self.annotations[img] != FLAGGED_LABEL
+        )
+        flagged = sum(
+            1 for img in self.images
+            if self.annotations.get(img) == FLAGGED_LABEL
+        )
+        reviewed = labeled + flagged
+        pct_labeled = int((labeled / total) * 100)
+
+        self.lbl_progress_summary.setText(
+            f"Labeled {labeled}/{total} • Flagged {flagged} • Reviewed {reviewed}"
+        )
+        self.progress_bar.setValue(pct_labeled)
+        self.progress_bar.setFormat(f"{pct_labeled}% Labeled")
 
     def export_csv(self):
-        if not self.annotations:
+        rows = [
+            (fname, label)
+            for fname, label in self.annotations.items()
+            if fname in self.images and label != FLAGGED_LABEL
+        ]
+        if not rows:
             QMessageBox.information(self, "Export", "No annotations to export.")
             return
             
@@ -309,9 +372,8 @@ class AnnotatorTab(QWidget):
         if save_path:
             try:
                 with open(save_path, 'w', newline='', encoding='utf-8') as f:
-                    for fname, label in self.annotations.items():
-                        if fname in self.images:
-                            f.write(f"{fname}\t{label}\n")
-                QMessageBox.information(self, "Success", f"Exported {len(self.annotations)} items to {save_path}")
+                    for fname, label in rows:
+                        f.write(f"{fname}\t{label}\n")
+                QMessageBox.information(self, "Success", f"Exported {len(rows)} items to {save_path}")
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to export: {e}")

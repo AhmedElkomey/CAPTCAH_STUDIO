@@ -1,9 +1,8 @@
 import os
-import random
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, 
     QProgressBar, QScrollArea, QGroupBox, QCheckBox, QComboBox, 
-    QSlider, QSpinBox, QListWidget, QListWidgetItem, QFileDialog, QMessageBox,
+    QSlider, QSpinBox, QListWidget, QFileDialog, QMessageBox,
     QFormLayout
 )
 from PySide6.QtCore import Qt, QThread, Signal, QTimer
@@ -11,38 +10,66 @@ import generator
 from bg_gen import TEXTURE_STYLES
 from ui.preview_widget import PreviewWidget
 
+PHOTO_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
+
 class BatchWorker(QThread):
     progress = Signal(int, int)
     finished = Signal()
     error = Signal(str)
 
-    def __init__(self, count, out_dir, prefix, scatter, jitter):
+    def __init__(self, count, out_dir, prefix, scatter, jitter, texture_style, config):
         super().__init__()
         self.count = count
         self.out_dir = out_dir
         self.prefix = prefix
         self.scatter = scatter
         self.jitter = jitter
+        self.texture_style = texture_style
+        self.config = dict(config)
         self.is_running = True
+
+    def _find_next_index(self, images_dir):
+        max_index = -1
+        for name in os.listdir(images_dir):
+            if not name.lower().endswith(".png"):
+                continue
+            if not name.startswith(self.prefix):
+                continue
+            remainder = name[len(self.prefix):]
+            idx = remainder.split("_", 1)[0]
+            if idx.isdigit():
+                max_index = max(max_index, int(idx))
+        return max_index + 1
 
     def run(self):
         try:
             images_dir = os.path.join(self.out_dir, "images")
             os.makedirs(images_dir, exist_ok=True)
             labels_path = os.path.join(self.out_dir, "labels.txt")
+            next_index = self._find_next_index(images_dir)
             
             with open(labels_path, 'a', encoding='utf-8') as f:
                 for i in range(self.count):
                     if not self.is_running:
                         break
                     
-                    img, text = generator.create_captcha(scatter_factor=self.scatter, jitter_factor=self.jitter)
-                    filename = f"{self.prefix}{i:04d}_{text}.png"
+                    img, text = generator.create_captcha(
+                        scatter_factor=self.scatter,
+                        jitter_factor=self.jitter,
+                        texture_style=self.texture_style,
+                        config=self.config,
+                    )
+                    filename = f"{self.prefix}{next_index:04d}_{text}.png"
                     out_path = os.path.join(images_dir, filename)
+                    while os.path.exists(out_path):
+                        next_index += 1
+                        filename = f"{self.prefix}{next_index:04d}_{text}.png"
+                        out_path = os.path.join(images_dir, filename)
                     img.save(out_path)
                     
                     f.write(f"{filename}\t{text}\n")
                     f.flush()
+                    next_index += 1
                     
                     self.progress.emit(i + 1, self.count)
             if self.is_running:
@@ -66,9 +93,14 @@ class GeneratorTab(QWidget):
     def init_ui(self):
         main_layout = QHBoxLayout(self)
         
-        # Left Panel (Dynamic Layout Settings)
+        # Left Panel (Dynamic Layout Settings) with scroll
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFixedWidth(420)
+        self.settings_scroll = scroll_area
+        
         settings_widget = QWidget()
-        settings_widget.setFixedWidth(400)
+        self.settings_widget = settings_widget
         settings_layout = QVBoxLayout(settings_widget)
         settings_layout.setContentsMargins(0, 0, 0, 0)
         settings_layout.setSpacing(4)
@@ -94,6 +126,15 @@ class GeneratorTab(QWidget):
         self.combo_bg_style.addItems(sorted(TEXTURE_STYLES.keys()))
         self.combo_bg_style.currentIndexChanged.connect(self.trigger_preview_update)
         bg_layout.addRow("Texture Style:", self.combo_bg_style)
+
+        # Custom Photo Dir Selection
+        photo_dir_layout = QHBoxLayout()
+        self.lbl_photo_dir = QLabel("None")
+        self.btn_browse_photo = QPushButton("📂 Select Photos Folder")
+        self.btn_browse_photo.clicked.connect(self.browse_photo_dir)
+        photo_dir_layout.addWidget(self.lbl_photo_dir)
+        photo_dir_layout.addWidget(self.btn_browse_photo)
+        bg_layout.addRow("Custom Photos:", photo_dir_layout)
         
         self.chk_bg_dist = QCheckBox("Apply Background Mesh Warp")
         self.chk_bg_dist.setChecked(generator.BG_DISTORTION)
@@ -157,14 +198,13 @@ class GeneratorTab(QWidget):
         
         settings_layout.addWidget(text_group)
         
-        # 3. Distractor Config
+        # 3. Noise / Obstruction Config
         dist_group = QGroupBox("Noise & Distractors")
         dist_layout = QFormLayout(dist_group)
         
-        self.chk_trans_dist = QCheckBox("Transparent Core Distractors")
-        self.chk_trans_dist.setChecked(generator.TRANSPARENT_DISTRACTOR)
-        self.chk_trans_dist.toggled.connect(self.trigger_preview_update)
-        dist_layout.addRow(self.chk_trans_dist)
+        self.lbl_blob_mode = QLabel("Two Blobs overlap: XOR blend")
+        self.lbl_blob_mode.setStyleSheet("color: #9aa0a6; padding: 2px 0;")
+        dist_layout.addRow(self.lbl_blob_mode)
         
         self.spin_noise_min = QSpinBox(); self.spin_noise_min.setRange(0, 300); self.spin_noise_min.setValue(generator.NOISE_ELEMENTS_MIN)
         self.spin_noise_max = QSpinBox(); self.spin_noise_max.setRange(0, 300); self.spin_noise_max.setValue(generator.NOISE_ELEMENTS_MAX)
@@ -188,26 +228,33 @@ class GeneratorTab(QWidget):
         for font in generator.AVAILABLE_FONTS:
             self.list_fonts.addItem(font)
             
-        font_buttons = QHBoxLayout()
         self.btn_add_font = QPushButton("➕ Add Fonts")
         self.btn_add_font.clicked.connect(self.add_fonts)
+        self.btn_add_font_folder = QPushButton("📂 Load Folder")
+        self.btn_add_font_folder.clicked.connect(self.add_font_folder)
         self.btn_rm_font = QPushButton("➖ Remove Selected")
         self.btn_rm_font.clicked.connect(self.remove_fonts)
         self.btn_reset_font = QPushButton("↺ Reset to Defaults")
         self.btn_reset_font.clicked.connect(self.reset_fonts)
         
-        font_buttons.addWidget(self.btn_add_font)
-        font_buttons.addWidget(self.btn_rm_font)
-        font_buttons.addWidget(self.btn_reset_font)
+        font_btns_row1 = QHBoxLayout()
+        font_btns_row1.addWidget(self.btn_add_font)
+        font_btns_row1.addWidget(self.btn_add_font_folder)
+        
+        font_btns_row2 = QHBoxLayout()
+        font_btns_row2.addWidget(self.btn_rm_font)
+        font_btns_row2.addWidget(self.btn_reset_font)
         
         font_layout.addWidget(self.list_fonts)
-        font_layout.addLayout(font_buttons)
+        font_layout.addLayout(font_btns_row1)
+        font_layout.addLayout(font_btns_row2)
         
         settings_layout.addWidget(dist_group)
         settings_layout.addWidget(font_group)
         settings_layout.addStretch()
         
-        main_layout.addWidget(settings_widget)
+        scroll_area.setWidget(settings_widget)
+        main_layout.addWidget(scroll_area)
         
         # Right Panel (Preview & Output)
         right_panel = QWidget()
@@ -243,10 +290,10 @@ class GeneratorTab(QWidget):
         
         dir_layout = QHBoxLayout()
         self.lbl_out_dir = QLabel(os.path.abspath(generator.OUTPUT_DIR))
-        btn_browse = QPushButton("Browse")
-        btn_browse.clicked.connect(self.browse_out_dir)
+        self.btn_browse = QPushButton("Browse")
+        self.btn_browse.clicked.connect(self.browse_out_dir)
         dir_layout.addWidget(self.lbl_out_dir)
-        dir_layout.addWidget(btn_browse)
+        dir_layout.addWidget(self.btn_browse)
         out_layout.addRow("Output Dir:", dir_layout)
         
         self.btn_generate = QPushButton("🚀 Generate Batch")
@@ -255,6 +302,7 @@ class GeneratorTab(QWidget):
         out_layout.addRow(self.btn_generate)
         
         self.progress_bar = QProgressBar()
+        self.progress_bar.setTextVisible(True)
         self.progress_bar.setVisible(False)
         out_layout.addRow(self.progress_bar)
         
@@ -277,8 +325,8 @@ class GeneratorTab(QWidget):
             "<b>Min / Max Chars:</b> Determines the string length of the generated label.<br>"
             "<b>Scatter:</b> The amount of random rotation angle applied to each individual character.<br>"
             "<b>Jitter:</b> The amount of random vertical displacement applied to each character.<br><br>"
-            "<b>Fonts Configuration:</b> The list of allowed TrueType/OpenType files. You can add your own local files, remove existing files, or reset to standard Windows fonts.<br><br>"
-            "<b>Transparent Core Distractors:</b> Shapes that XOR text but let background noise show through vs blocking noise completely.<br>"
+            "<b>Fonts Configuration:</b> The list of allowed TrueType/OpenType files. You can add your own local files, load an entire folder of fonts, remove existing files, or reset to standard Windows fonts.<br><br>"
+            "<b>Two Blobs:</b> Opaque blob distractors overlap text using XOR blend mode to create harder adversarial intersections.<br>"
             "<b>Noise Count & Mixed Shapes:</b> The density of background lines, curves, circles, and shapes overlaid on the image.<br><br>"
             "<h3>Batch Output</h3>"
             "Will generate a designated amount of CAPTCHAs into your chosen directory, placing the PNG images into an <code>images/</code> subfolder and writing the correct text strings into a <code>labels.txt</code> TSV file."
@@ -289,29 +337,68 @@ class GeneratorTab(QWidget):
         msg.setText(help_text)
         msg.exec()
 
+    def browse_photo_dir(self):
+        folder = QFileDialog.getExistingDirectory(self, "Select Photos Directory")
+        if folder:
+            self.lbl_photo_dir.setText(folder)
+            self.trigger_preview_update()
+
+    def custom_photo_folder_is_valid(self):
+        folder = self.lbl_photo_dir.text()
+        if not folder or folder == "None" or not os.path.isdir(folder):
+            return False
+        try:
+            return any(
+                os.path.splitext(name.lower())[1] in PHOTO_EXTENSIONS
+                for name in os.listdir(folder)
+            )
+        except OSError:
+            return False
+
+    def collect_generator_config(self):
+        return {
+            "rich_background_probability": self.spin_rich_bg_prob.value() / 100.0,
+            "solid_background_probability": self.spin_solid_bg_prob.value() / 100.0,
+            "bg_distortion": self.chk_bg_dist.isChecked(),
+            "bg_scribbles": self.chk_bg_scribbles.isChecked(),
+            "bg_vignette": self.chk_bg_vignette.isChecked(),
+            "bg_distortion_min": self.spin_bg_dist_min.value() / 10.0,
+            "bg_distortion_max": self.spin_bg_dist_max.value() / 10.0,
+            "bg_scribble_opacity": self.spin_bg_scribble_op.value() / 100.0,
+            "noise_elements_min": self.spin_noise_min.value(),
+            "noise_elements_max": self.spin_noise_max.value(),
+            "noise_shapes_min": self.spin_shape_min.value(),
+            "noise_shapes_max": self.spin_shape_max.value(),
+            "img_width": self.spin_width.value(),
+            "img_height": self.spin_height.value(),
+            "min_chars": self.spin_min_ch.value(),
+            "max_chars": self.spin_max_ch.value(),
+            "available_fonts": [self.list_fonts.item(i).text() for i in range(self.list_fonts.count())],
+            "custom_photo_dir": self.lbl_photo_dir.text() if self.lbl_photo_dir.text() != "None" else None,
+        }
+
     def sync_globals(self):
-        """Pushes UI settings into generator module globals where needed"""
-        generator.RICH_BACKGROUND_PROBABILITY = self.spin_rich_bg_prob.value() / 100.0
-        generator.SOLID_BACKGROUND_PROBABILITY = self.spin_solid_bg_prob.value() / 100.0
-        generator.BG_DISTORTION = self.chk_bg_dist.isChecked()
-        generator.BG_SCRIBBLES = self.chk_bg_scribbles.isChecked()
-        generator.BG_VIGNETTE = self.chk_bg_vignette.isChecked()
-        generator.BG_DISTORTION_MIN = self.spin_bg_dist_min.value() / 10.0
-        generator.BG_DISTORTION_MAX = self.spin_bg_dist_max.value() / 10.0
-        generator.BG_SCRIBBLE_OPACITY = self.spin_bg_scribble_op.value() / 100.0
-        
-        generator.TRANSPARENT_DISTRACTOR = self.chk_trans_dist.isChecked()
-        generator.NOISE_ELEMENTS_MIN = self.spin_noise_min.value()
-        generator.NOISE_ELEMENTS_MAX = self.spin_noise_max.value()
-        generator.NOISE_SHAPES_MIN = self.spin_shape_min.value()
-        generator.NOISE_SHAPES_MAX = self.spin_shape_max.value()
-        
-        generator.IMG_WIDTH = self.spin_width.value()
-        generator.IMG_HEIGHT = self.spin_height.value()
-        generator.MIN_CHARS = self.spin_min_ch.value()
-        generator.MAX_CHARS = self.spin_max_ch.value()
-        
-        generator.AVAILABLE_FONTS = [self.list_fonts.item(i).text() for i in range(self.list_fonts.count())]
+        """Pushes UI settings into generator globals and returns a snapshot config."""
+        cfg = self.collect_generator_config()
+        generator.RICH_BACKGROUND_PROBABILITY = cfg["rich_background_probability"]
+        generator.SOLID_BACKGROUND_PROBABILITY = cfg["solid_background_probability"]
+        generator.BG_DISTORTION = cfg["bg_distortion"]
+        generator.BG_SCRIBBLES = cfg["bg_scribbles"]
+        generator.BG_VIGNETTE = cfg["bg_vignette"]
+        generator.BG_DISTORTION_MIN = cfg["bg_distortion_min"]
+        generator.BG_DISTORTION_MAX = cfg["bg_distortion_max"]
+        generator.BG_SCRIBBLE_OPACITY = cfg["bg_scribble_opacity"]
+        generator.NOISE_ELEMENTS_MIN = cfg["noise_elements_min"]
+        generator.NOISE_ELEMENTS_MAX = cfg["noise_elements_max"]
+        generator.NOISE_SHAPES_MIN = cfg["noise_shapes_min"]
+        generator.NOISE_SHAPES_MAX = cfg["noise_shapes_max"]
+        generator.IMG_WIDTH = cfg["img_width"]
+        generator.IMG_HEIGHT = cfg["img_height"]
+        generator.MIN_CHARS = cfg["min_chars"]
+        generator.MAX_CHARS = cfg["max_chars"]
+        generator.AVAILABLE_FONTS = cfg["available_fonts"]
+        generator.CUSTOM_PHOTO_DIR = cfg["custom_photo_dir"]
+        return cfg
 
     def add_fonts(self):
         files, _ = QFileDialog.getOpenFileNames(self, "Select Fonts", "C:/Windows/Fonts", "Fonts (*.ttf *.otf *.ttc)")
@@ -320,6 +407,19 @@ class GeneratorTab(QWidget):
             for f in files:
                 if f not in existing:
                     self.list_fonts.addItem(f)
+            self.trigger_preview_update()
+
+    def add_font_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "Select Font Folder")
+        if folder:
+            existing = [self.list_fonts.item(i).text() for i in range(self.list_fonts.count())]
+            valid_exts = {".ttf", ".otf", ".ttc"}
+            for root, dirs, files in os.walk(folder):
+                for file in files:
+                    if os.path.splitext(file.lower())[1] in valid_exts:
+                        f_path = os.path.join(root, file).replace("\\", "/")
+                        if f_path not in existing:
+                            self.list_fonts.addItem(f_path)
             self.trigger_preview_update()
 
     def remove_fonts(self):
@@ -335,60 +435,64 @@ class GeneratorTab(QWidget):
         self.trigger_preview_update()
 
     def update_preview(self):
-        self.sync_globals()
-        
-        # Mocking the `style` string directly by monkey-patching bg_gen.py is bad.
-        # However, create_captcha() hardcodes style="random". 
-        # We can temporarily overwrite the generate_texture_image function arg if we want,
-        # but the request was generator.USE_RICH_BACKGROUNDS flag. For now the UI triggers preview
-        # We will use exactly what create_captcha makes.
-        
-        # Save current state of create_captcha if we need to hack the random style
-        # Luckily it uses "random" by default. We can let it be "random" for Phase 5 prototype,
-        # or we patch it safely:
+        cfg = self.sync_globals()
         style_choice = self.combo_bg_style.currentText()
-        
-        import bg_gen
-        original_gen = bg_gen.generate_texture_image
-        
-        def mock_gen(*args, **kwargs):
-            if style_choice != "random":
-                kwargs["style"] = style_choice
-            return original_gen(*args, **kwargs)
-            
-        bg_gen.generate_texture_image = mock_gen
-        
+
+        if style_choice == "custom_photo" and not self.custom_photo_folder_is_valid():
+            self.preview_widget.clear()
+            self.preview_widget.setText("Select a valid photos folder for custom_photo style.")
+            return
+
         try:
             scatter = self.sld_scatter.value() / 100.0
             jitter = self.sld_jitter.value() / 100.0
-            img, text = generator.create_captcha(scatter_factor=scatter, jitter_factor=jitter)
+            img, _ = generator.create_captcha(
+                scatter_factor=scatter,
+                jitter_factor=jitter,
+                texture_style=style_choice,
+                config=cfg,
+            )
             self.preview_widget.set_image(img)
         except Exception as e:
             print(f"Preview error: {e}")
-        finally:
-            bg_gen.generate_texture_image = original_gen
 
     def browse_out_dir(self):
         folder = QFileDialog.getExistingDirectory(self, "Select Output Directory", self.lbl_out_dir.text())
         if folder:
             self.lbl_out_dir.setText(folder)
 
+    def set_generation_ui_state(self, is_generating):
+        self.settings_scroll.setEnabled(not is_generating)
+        self.spin_count.setEnabled(not is_generating)
+        self.btn_browse.setEnabled(not is_generating)
+        self.btn_refresh.setEnabled(not is_generating)
+        self.btn_generate.setText("🛑 Stop Generation" if is_generating else "🚀 Generate Batch")
+
     def start_generation(self):
         if self.worker and self.worker.isRunning():
             self.worker.is_running = False
             self.worker.wait()
-            self.btn_generate.setText("🚀 Generate Batch")
+            self.worker = None
+            self.set_generation_ui_state(False)
             self.progress_bar.setVisible(False)
             return
 
-        self.sync_globals()
+        cfg = self.sync_globals()
         
         count = self.spin_count.value()
         out_dir = self.lbl_out_dir.text()
         scatter = self.sld_scatter.value() / 100.0
         jitter = self.sld_jitter.value() / 100.0
+        style_choice = self.combo_bg_style.currentText()
+        if style_choice == "custom_photo" and not self.custom_photo_folder_is_valid():
+            QMessageBox.warning(
+                self,
+                "Custom Photo Background",
+                "Please select a valid photos folder that contains at least one .jpg/.jpeg/.png/.webp image.",
+            )
+            return
         
-        self.worker = BatchWorker(count, out_dir, "test_", scatter, jitter)
+        self.worker = BatchWorker(count, out_dir, "captcha_", scatter, jitter, style_choice, cfg)
         self.worker.progress.connect(self.update_progress)
         self.worker.finished.connect(self.generation_finished)
         self.worker.error.connect(self.generation_error)
@@ -396,20 +500,23 @@ class GeneratorTab(QWidget):
         self.progress_bar.setMaximum(count)
         self.progress_bar.setValue(0)
         self.progress_bar.setVisible(True)
-        self.btn_generate.setText("🛑 Stop Generation")
+        self.set_generation_ui_state(True)
         
         self.worker.start()
 
     def update_progress(self, val, total):
         self.progress_bar.setValue(val)
-        self.progress_bar.setFormat(f"Generating {val}/{total}")
+        percent = int((val / total) * 100) if total else 0
+        self.progress_bar.setFormat(f"Generating {val}/{total} ({percent}%)")
 
     def generation_finished(self):
-        self.btn_generate.setText("🚀 Generate Batch")
+        self.worker = None
+        self.set_generation_ui_state(False)
         QMessageBox.information(self, "Finished", "Batch generation complete!")
         self.progress_bar.setVisible(False)
 
     def generation_error(self, err):
-        self.btn_generate.setText("🚀 Generate Batch")
+        self.worker = None
+        self.set_generation_ui_state(False)
         QMessageBox.critical(self, "Error", f"Failed to generate: {err}")
         self.progress_bar.setVisible(False)

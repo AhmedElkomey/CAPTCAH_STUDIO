@@ -16,9 +16,12 @@ data/
 test/
 annotations.json
 labels.txt
+flags.txt
 *.csv
+verification_test_out/
 
 # Pyinstaller specific
 build/
 dist/
 *.spec
+PROJECT_ONBOARDING_REVIEW.md
