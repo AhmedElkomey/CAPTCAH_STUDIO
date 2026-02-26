@@ -396,7 +396,6 @@ def create_captcha(scatter_factor=0.6, jitter_factor=0.5, texture_style="random"
     adj_max = max(min_chars, max_chars)
     text_length = random.randint(adj_min, adj_max)
     text = generate_random_string(text_length)
-    text_layer = Image.new('RGBA', img.size, (0, 0, 0, 0))
     
     # Pick a random font for the ENTIRE word
     if available_fonts:
@@ -408,15 +407,19 @@ def create_captcha(scatter_factor=0.6, jitter_factor=0.5, texture_style="random"
     except IOError:
         font = ImageFont.load_default()
         
-    # Calculate starting position
-    char_w_estimate = int(font.getbbox('A')[2] if hasattr(font, 'getbbox') else font.getsize('A')[0])
-    advance_estimate = int(char_w_estimate * (0.55 + 0.25 * scatter_factor))
-    estimated_total_width = text_length * advance_estimate
-    
-    current_x = max(10, (img_width - estimated_total_width) // 2) + random.randint(-10, 10)
     # Keep one random text color per captcha image.
     text_color = (random.randint(0, 100), random.randint(0, 100), random.randint(0, 100), 255)
-    
+
+    # Keep text inside explicit safe margins and center the final text block.
+    margin_x = max(8, min(28, int(img_width * 0.06)))
+    margin_y = max(6, min(20, int(img_height * 0.10)))
+    available_w = max(1, img_width - 2 * margin_x)
+    available_h = max(1, img_height - 2 * margin_y)
+
+    glyphs = []
+    y_offsets = []
+    advances = []
+
     for char in text:
         bbox = font.getbbox(char) if hasattr(font, 'getbbox') else font.getsize(char)
         if hasattr(font, 'getbbox'):
@@ -424,36 +427,91 @@ def create_captcha(scatter_factor=0.6, jitter_factor=0.5, texture_style="random"
             char_h = bbox[3] - bbox[1]
         else:
             char_w, char_h = bbox
-            
+
         c_img = Image.new('RGBA', (char_w * 3, char_h * 3), (0, 0, 0, 0))
         c_draw = ImageDraw.Draw(c_img)
 
         c_draw.text((char_w, char_h), char, font=font, fill=text_color)
-        
+
         # Reduced angle for less scatter
         max_angle = 25 * scatter_factor
         angle = random.uniform(-max_angle, max_angle)
         c_img = c_img.rotate(angle, resample=Image.BICUBIC, expand=1, fillcolor=(0, 0, 0, 0))
-        
+
         # Crop tight to allow overlapping
         c_bbox = c_img.getbbox()
         if c_bbox:
             c_img = c_img.crop(c_bbox)
-            
+
+        glyphs.append(c_img)
+
         # Reduced vertical jitter
         max_jitter = int(5 * jitter_factor)
-        y_jitter = random.randint(-max_jitter, max_jitter)
-        base_y = (img_height - c_img.height) // 2
-        paste_y = base_y + y_jitter
-        
-        text_layer.paste(c_img, (current_x, paste_y), c_img)
-        
+        y_offsets.append(random.randint(-max_jitter, max_jitter))
+
         advance = int(c_img.width * random.uniform(0.7, 1 + 0.3 * scatter_factor))
+        advances.append(max(1, advance))
+
+    # Compose text on a local block first, then center-fit that block into the image.
+    x_positions = []
+    current_x = 0
+    for advance in advances:
+        x_positions.append(current_x)
         current_x += advance
+
+    block_w = max(
+        (x + glyph.width for x, glyph in zip(x_positions, glyphs)),
+        default=1
+    )
+    min_y = min(y_offsets) if y_offsets else 0
+    max_y = max(
+        (y + glyph.height for y, glyph in zip(y_offsets, glyphs)),
+        default=1
+    )
+    block_h = max(1, max_y - min_y)
+
+    # Padding reduces clipping risk when wave distortion shifts pixels.
+    distortion_pad = max(4, int(8 * max(0.5, scatter_factor)))
+    text_block = Image.new(
+        'RGBA',
+        (block_w + distortion_pad * 2, block_h + distortion_pad * 2),
+        (0, 0, 0, 0),
+    )
+
+    for x, y, glyph in zip(x_positions, y_offsets, glyphs):
+        paste_x = x + distortion_pad
+        paste_y = (y - min_y) + distortion_pad
+        text_block.paste(glyph, (paste_x, paste_y), glyph)
 
     # 3. Apply RANDOM Wave Distortion to Text Layer
     if random.random() > 0.4:
-        text_layer = apply_wave_distortion(text_layer, intensity=scatter_factor)
+        text_block = apply_wave_distortion(text_block, intensity=scatter_factor)
+
+    # Trim transparent edges after distortion.
+    block_bbox = text_block.getbbox()
+    if block_bbox:
+        text_block = text_block.crop(block_bbox)
+    else:
+        text_block = Image.new('RGBA', (1, 1), (0, 0, 0, 0))
+
+    # Ensure the final block always fits the safe drawing area.
+    block_w, block_h = text_block.size
+    if block_w > available_w or block_h > available_h:
+        fit_scale = min(available_w / max(1, block_w), available_h / max(1, block_h))
+        new_w = max(1, int(block_w * fit_scale))
+        new_h = max(1, int(block_h * fit_scale))
+        resample_filter = getattr(Image, 'Resampling', Image).LANCZOS
+        text_block = text_block.resize((new_w, new_h), resample=resample_filter)
+        block_w, block_h = text_block.size
+
+    # Center text block while respecting safe margins.
+    paste_x = margin_x + max(0, (available_w - block_w) // 2)
+    paste_y = margin_y + max(0, (available_h - block_h) // 2)
+    paste_x = max(margin_x, min(paste_x, img_width - margin_x - block_w))
+    paste_y = max(margin_y, min(paste_y, img_height - margin_y - block_h))
+
+    text_layer = Image.new('RGBA', img.size, (0, 0, 0, 0))
+    text_layer.paste(text_block, (paste_x, paste_y), text_block)
 
     # Combine background and text
     img = Image.alpha_composite(img, text_layer)
